@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+import asyncio
 from threading import Thread
 from flask import Flask
 from telegram import Update
@@ -25,6 +26,8 @@ LIVE_KEYS = [
     "AQ.Ab8RN6K-qPqK-hv51W4YiY9JANsNtmFlWXWU9AFbjUrkcla7Xg"
 ]
 
+TARGET_CHANNEL = "@ALLFELUBOTS"  # შენი არხის Username
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 async def gemini(key, prompt):
@@ -46,9 +49,25 @@ async def translate_text(text):
     for key in LIVE_KEYS:
         try:
             return await gemini(key, prompt)
-        except Exception:
+        except Exception as e:
+            logging.error(f"Gemini error: {e}")
             continue
     return None
+
+# სატესტო შეტყობინების გაგზავნა გაშვებისას
+async def send_test_message(app):
+    test_text = "🚨 TEST MESSAGE: Bitcoin price breaks $100,000 threshold as market sentiment turns heavily bullish!"
+    logging.info("სატესტო შეტყობინების თარგმნა...")
+    
+    translated = await translate_text(test_text)
+    body = translated if translated else "⚠️ თარგმანის გარეშე\n\n" + test_text
+    final_text = f"🧪 **სატესტო პოსტი (Render)**\n\n{body}\n\n📡 გადათარგმნილია ავტომატურად"
+    
+    try:
+        await app.bot.send_message(chat_id=TARGET_CHANNEL, text=final_text, parse_mode="Markdown")
+        logging.info("სატესტო შეტყობინება წარმატებით გაიგზავნა არხში!")
+    except Exception as e:
+        logging.error(f"სატესტო შეტყობინების გაგზავნის შეცდომა: {e}")
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
@@ -68,12 +87,16 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await context.bot.send_message(chat_id=message.chat_id, text=final_text)
 
+async def post_init(app):
+    # სტარტზევე გააგზავნის სატესტო პოსტს
+    asyncio.create_task(send_test_message(app))
+
 if __name__ == "__main__":
-    # Flask-ის გაშვება ცალკე ნაკადში (Thread)
     Thread(target=run_flask).start()
 
     TOKEN = os.getenv("BOT_TOKEN", "8959231295:AAEEs-A6bD2txWI2i_7EfcKJ_peGHlIriho")
-    app = ApplicationBuilder().token(TOKEN).build()
+    
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.TEXT | filters.CAPTION), handle_channel_post))
     
