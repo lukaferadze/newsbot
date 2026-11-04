@@ -62,8 +62,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_message(chat_id=message.chat_id, text=final_text)
 
 if __name__ == "__main__":
-    # ტოკენს კითხულობს Environment-იდან ან პირდაპირ სტრინგიდან
-    TOKEN = os.getenv("BOT_TOKEN", "778899...შენი_ტელეგრამ_ბოტის_ტოკენი...")
+    TOKEN = os.getenv("BOT_TOKEN", "8959231295:AAEEs-A6bD2txWI2i_7EfcKJ_peGHlIriho")
     
     app = ApplicationBuilder().token(TOKEN).build()
     
