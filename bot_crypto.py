@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram ბოტი: CryptoNews (Cointelegraph)
+Telegram ბოტი: კრიპტო ამბები (CryptoNews, CoinDesk და ა.შ.)
 """
 import asyncio
 import hashlib
@@ -17,6 +17,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
+from aiohttp import web
 from telethon import TelegramClient, events
 
 API_ID = 38550110
@@ -29,17 +30,15 @@ DATA_DIR = os.path.expanduser("~/newsbot")
 
 BOT = {
     "name": "crypto",
-    "title": "CryptoNews",
-    "sources": ["cointelegraph"],
-    "bot_token": "8959231295:AAEEs-A6bD2txWI2i_7EfcKJ_peGHlIriho",
-    "target": "me",                 # ავტომატურად გააგზავნის შენს საკუთარ ჩატში/არხში
+    "title": "კრიპტო ამბები",
+    "sources": ["CryptoNews", "coindesk"],
+    "bot_token": "8673690180:AAE48EvbZWG3DJpyw9jbl1HN7mNXy314Pqk",
+    "target": "me",
     "live_keys": ["AQ.Ab8RN6KD8V0UwcFq1BxRvzIP3Q8HeJn43dh88XOZwDAchAH6hQ", "AQ.Ab8RN6JbyIcOg2OP1tEfeckU_R3MJzr7AwSY2bjMbcvceiK9Ww", "AQ.Ab8RN6K-qPqK-hv51W4YiY9JANsNtmFlWXWU9AFbjUrkcla7Xg"],
     "digest_key": "AQ.Ab8RN6JPCnc4XfzphrrWB86bt3jiEXE4ThbBeBzLUq9m3TWtgw",
     "sections": (
-        "1) 🏢 კრიპტო კომპანიები: თითო კომპანია ცალკე ქვესათაურად (მაგ. Binance, Coinbase), "
-        "მის ქვეშ ბულეტები.\n"
-        "2) 🪙 კრიპტოვალუტები და ბაზარი: ფასები, ტენდენციები, რეგულაციები.\n"
-        "3) 📌 სხვა ინფორმაცია: ყველაფერი დანარჩენი."
+        "1) 🪙 კრიპტოვალუტები: ბიტკოინი, ეთერიუმი და სხვა მონეტები.\n"
+        "2) 📈 ბაზრის ტენდენციები და სიახლეები."
     ),
 }
 
@@ -58,6 +57,19 @@ FORMAT_RULES = (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Render-ისთვის Dummy HTTP Server
+async def handle_dummy_web(request):
+    return web.Response(text="Crypto Bot is running!")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get('/', handle_dummy_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
 
 def to_peer(x):
     if isinstance(x, int):
@@ -428,7 +440,13 @@ async def main():
     miss = bot.missing()
     if miss:
         raise SystemExit(f"ჯერ კიდევ არ არის შევსებული {len(miss)} მნიშვნელობა. ჩაწერე ფაილის თავში.")
-    await bot.user.start()
+    
+    # გააშვებინე ბოტი ტოკენით
+    await bot.user.start(bot_token=bot.bot_token)
+    
+    # გაუშვი Dummy სერვერი Render Web Service-ისთვის
+    await start_dummy_server()
+    
     me = await bot.user.get_me()
     logging.info("[%s] გაშვებულია როგორც %s. წყაროები: %s", bot.name, me.first_name, bot.sources)
     await bot.run()
