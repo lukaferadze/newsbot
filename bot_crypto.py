@@ -21,14 +21,13 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Flask-ის გაშვება ცალკე ნაკადში (Thread)
+# Flask-ის გაშვება ცალკე ნაკადში
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---- 1. ENVIRONMENT & CONFIGURATION ----
 
-
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
+API_ID = int(os.environ.get("API_ID", 38550110))
+API_HASH = os.environ.get("API_HASH", "105eca78038f6c31ec679ec8f09b8e9c")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TARGET_CHAT = os.environ.get("TARGET_CHAT", "")
 SOURCES = [s.strip() for s in os.environ.get("SOURCES", "cointelegraph").split(",") if s.strip()]
@@ -42,13 +41,13 @@ ADMIN_CHAT = os.environ.get("ADMIN_CHAT", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Global caches
+# Global caches & clients
 processed_hashes = set()
 daily_posts = []
 last_digest_date = None
 
-user_client = TelegramClient('crypto_user_session', API_ID, API_HASH)
-bot_client = TelegramClient('crypto_bot_session', API_ID, API_HASH)
+user_client = None
+bot_client = None
 
 # ---- 2. GEMINI TRANSLATION LOGIC ----
 async def call_gemini(key: str, prompt: str) -> str:
@@ -94,47 +93,7 @@ async def generate_digest(posts_list: list, is_weekly: bool = False) -> str:
             await asyncio.sleep(180)
     return None
 
-# ---- 3. EVENT HANDLERS ----
-@user_client.on(events.NewMessage(chats=SOURCES))
-async def handle_new_post(event):
-    global daily_posts
-    text = event.message.message or ""
-    if not text.strip():
-        return
-
-    # Duplicate filter
-    msg_hash = hash(text.strip())
-    if msg_hash in processed_hashes:
-        return
-    processed_hashes.add(msg_hash)
-
-    # Translation
-    translated = await translate_text(text)
-    if translated:
-        final_text = f"{translated}\n\n📡 გადათარგმნილია ავტომატურად"
-    else:
-        final_text = f"⚠️ თარგმანის გარეშე\n\n{text}\n\n📡 გადათარგმნილია ავტომატურად"
-
-    daily_posts.append(final_text)
-
-    # Media handling (>50MB check)
-    media = event.message.media
-    file_to_send = None
-    if media:
-        if isinstance(media, MessageMediaDocument) and media.document.size > 50 * 1024 * 1024:
-            final_text += f"\n\n🔗 [დიდი ფაილის ორიგინალი ბმული]({event.message.message_link})"
-        else:
-            file_to_send = await event.message.download_media()
-
-    try:
-        await bot_client.send_message(TARGET_CHAT, final_text, file=file_to_send)
-    except Exception as e:
-        logging.error(f"[Crypto Post Error] Failed to send message: {e}")
-    finally:
-        if file_to_send and os.path.exists(file_to_send):
-            os.remove(file_to_send)
-
-# ---- 4. DAILY/WEEKLY DIGEST SCHEDULER ----
+# ---- 3. DAILY/WEEKLY DIGEST SCHEDULER ----
 async def digest_scheduler():
     global last_digest_date, daily_posts
     tz = zoneinfo.ZoneInfo(TZ_NAME)
@@ -150,7 +109,6 @@ async def digest_scheduler():
                 if digest_res:
                     await bot_client.send_message(TARGET_CHAT, f"📊 **კრიპტო დღის მიმოხილვა**\n\n{digest_res}")
                     
-                    # Friday weekly digest
                     if now.weekday() == 4:
                         logging.info("[Crypto Digest] Generating weekly digest...")
                         weekly_res = await generate_digest(daily_posts, is_weekly=True)
@@ -167,12 +125,54 @@ async def digest_scheduler():
 
         await asyncio.sleep(60)
 
-# ---- 5. MAIN EXECUTION ----
+# ---- 4. MAIN EXECUTION ----
 async def main():
+    global user_client, bot_client
+    
+    user_client = TelegramClient('crypto_user_session', API_ID, API_HASH)
+    bot_client = TelegramClient('crypto_bot_session', API_ID, API_HASH)
+
+    @user_client.on(events.NewMessage(chats=SOURCES))
+    async def handle_new_post(event):
+        global daily_posts
+        text = event.message.message or ""
+        if not text.strip():
+            return
+
+        msg_hash = hash(text.strip())
+        if msg_hash in processed_hashes:
+            return
+        processed_hashes.add(msg_hash)
+
+        translated = await translate_text(text)
+        if translated:
+            final_text = f"{translated}\n\n📡 გადათარგმნილია ავტომატურად"
+        else:
+            final_text = f"⚠️ თარგმანის გარეშე\n\n{text}\n\n📡 გადათარგმნილია ავტომატურად"
+
+        daily_posts.append(final_text)
+
+        media = event.message.media
+        file_to_send = None
+        if media:
+            if isinstance(media, MessageMediaDocument) and media.document.size > 50 * 1024 * 1024:
+                final_text += f"\n\n🔗 [დიდი ფაილის ორიგინალი ბმული]({event.message.message_link})"
+            else:
+                file_to_send = await event.message.download_media()
+
+        try:
+            await bot_client.send_message(TARGET_CHAT, final_text, file=file_to_send)
+        except Exception as e:
+            logging.error(f"[Crypto Post Error] Failed to send message: {e}")
+        finally:
+            if file_to_send and os.path.exists(file_to_send):
+                os.remove(file_to_send)
+
     await user_client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
     logging.info("Crypto News Bot Started...")
     asyncio.create_task(digest_scheduler())
+    
     await asyncio.gather(
         user_client.run_until_disconnected(),
         bot_client.run_until_disconnected()
