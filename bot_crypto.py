@@ -8,14 +8,24 @@ import zoneinfo
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
+import threading
+from flask import Flask
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# Flask-ის გაშვება ცალკე ნაკადში (Thread)
+threading.Thread(target=run_flask, daemon=True).start()
+
 # ---- 1. ENVIRONMENT & CONFIGURATION ----
-ENV_FILE = os.path.expanduser("~/newsbot/crypto.env")
-if os.path.exists(ENV_FILE):
-    with open(ENV_FILE) as f:
-        for line in f:
-            if line.strip() and not line.startswith('#'):
-                k, v = line.strip().split('=', 1)
-                os.environ[k] = v
+
 
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
