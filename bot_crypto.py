@@ -1,104 +1,172 @@
 import os
+import sys
+import asyncio
 import logging
 import httpx
-import asyncio
-from threading import Thread
-from flask import Flask
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from datetime import datetime, time
+import zoneinfo
+from telethon import TelegramClient, events
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
-# Render-ისთვის ვებ-სერვერის გაშვება (პორტის დასაჭერად)
-web_app = Flask('')
+# ---- 1. ENVIRONMENT & CONFIGURATION ----
+ENV_FILE = os.path.expanduser("~/newsbot/crypto.env")
+if os.path.exists(ENV_FILE):
+    with open(ENV_FILE) as f:
+        for line in f:
+            if line.strip() and not line.startswith('#'):
+                k, v = line.strip().split('=', 1)
+                os.environ[k] = v
 
-@web_app.route('/')
-def home():
-    return "Bot is alive!"
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+TARGET_CHAT = os.environ.get("TARGET_CHAT", "")
+SOURCES = [s.strip() for s in os.environ.get("SOURCES", "cointelegraph").split(",") if s.strip()]
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    web_app.run(host='0.0.0.0', port=port)
+LIVE_KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.strip()]
+DIGEST_KEY = os.environ.get("GEMINI_DIGEST_KEY", "")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Gemini API კონფიგურაცია
-MODEL = "gemini-2.5-flash"
-LIVE_KEYS = [
-    "AQ.Ab8RN6KD8V0UwcFq1BxRvzIP3Q8HeJn43dh88XOZwDAchAH6hQ",
-    "AQ.Ab8RN6JbyIcOg2OP1tEfeckU_R3MJzr7AwSY2bjMbcvceiK9Ww",
-    "AQ.Ab8RN6K-qPqK-hv51W4YiY9JANsNtmFlWXWU9AFbjUrkcla7Xg"
-]
-
-TARGET_CHANNEL = "@ALLFELUBOTS"  # შენი არხის Username
+TZ_NAME = os.environ.get("TZ_NAME", "Asia/Tbilisi")
+ADMIN_CHAT = os.environ.get("ADMIN_CHAT", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-async def gemini(key, prompt):
+# Global caches
+processed_hashes = set()
+daily_posts = []
+last_digest_date = None
+
+user_client = TelegramClient('crypto_user_session', API_ID, API_HASH)
+bot_client = TelegramClient('crypto_bot_session', API_ID, API_HASH)
+
+# ---- 2. GEMINI TRANSLATION LOGIC ----
+async def call_gemini(key: str, prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    async with httpx.AsyncClient(timeout=60) as c:
-        r = await c.post(
+    async with httpx.AsyncClient(timeout=60) as client:
+        res = await client.post(
             url,
             headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
+            json={"contents": [{"parts": [{"text": prompt}]}]}
         )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    res.raise_for_status()
+    data = res.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-async def translate_text(text):
+async def translate_text(text: str) -> str:
     prompt = (
         "თარგმნე შემდეგი ტექსტი ქართულად. შეინარჩუნე სახელები, ციფრები, ჰეშთეგები, "
         "ემოჯები და ბმულები. არ დაამატო კომენტარი, დაწერე მხოლოდ თარგმანი.\n\n" + text
     )
-    for key in LIVE_KEYS:
-        try:
-            return await gemini(key, prompt)
-        except Exception as e:
-            logging.error(f"Gemini error: {e}")
-            continue
+    for round_num in range(5):
+        for key in LIVE_KEYS:
+            try:
+                return await call_gemini(key, prompt)
+            except Exception as e:
+                logging.warning(f"[Crypto Live API Error] Key {key[:8]} failed: {e}")
+                continue
+        await asyncio.sleep(20)
     return None
 
-# სატესტო შეტყობინების გაგზავნა გაშვებისას
-async def send_test_message(app):
-    test_text = "🚨 TEST MESSAGE: Bitcoin price breaks $100,000 threshold as market sentiment turns heavily bullish!"
-    logging.info("სატესტო შეტყობინების თარგმნა...")
-    
-    translated = await translate_text(test_text)
-    body = translated if translated else "⚠️ თარგმანის გარეშე\n\n" + test_text
-    final_text = f"🧪 **სატესტო პოსტი (Render)**\n\n{body}\n\n📡 გადათარგმნილია ავტომატურად"
-    
-    try:
-        await app.bot.send_message(chat_id=TARGET_CHANNEL, text=final_text, parse_mode="Markdown")
-        logging.info("სატესტო შეტყობინება წარმატებით გაიგზავნა არხში!")
-    except Exception as e:
-        logging.error(f"სატესტო შეტყობინების გაგზავნის შეცდომა: {e}")
+async def generate_digest(posts_list: list, is_weekly: bool = False) -> str:
+    combined_text = "\n---\n".join(posts_list)
+    title = "კრიპტო ბაზრის კვირის მიმოხილვა" if is_weekly else "კრიპტო ბაზრის დღის მიმოხილვა"
+    prompt = (
+        f"შექმენი {title} ქართულ ენაზე შემდეგი სიახლეების მიხედვით.\n"
+        "დააჯგუფე ინფორმაცია სექციებად: 🏢 კრიპტო კომპანიები, 📈 ბაზრის ტენდენციები, ⚖️ რეგულაციები და სხვა.\n"
+        "გამოიყენე ბულეტები (•). იყავი კონკრეტული და მოკლე.\n\n" + combined_text
+    )
+    for attempt in range(5):
+        try:
+            return await call_gemini(DIGEST_KEY, prompt)
+        except Exception as e:
+            logging.error(f"[Crypto Digest API Error] Attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(180)
+    return None
 
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.channel_post
-    if not message:
-        return
-
-    text = message.text or message.caption or ""
+# ---- 3. EVENT HANDLERS ----
+@user_client.on(events.NewMessage(chats=SOURCES))
+async def handle_new_post(event):
+    global daily_posts
+    text = event.message.message or ""
     if not text.strip():
         return
 
-    if "📡 გადათარგმნილია ავტომატურად" in text or "⚠️ თარგმანის გარეშე" in text:
+    # Duplicate filter
+    msg_hash = hash(text.strip())
+    if msg_hash in processed_hashes:
         return
+    processed_hashes.add(msg_hash)
 
+    # Translation
     translated = await translate_text(text)
-    body = translated if translated else "⚠️ თარგმანის გარეშე\n\n" + text
-    final_text = f"{body}\n\n📡 გადათარგმნილია ავტომატურად"
+    if translated:
+        final_text = f"{translated}\n\n📡 გადათარგმნილია ავტომატურად"
+    else:
+        final_text = f"⚠️ თარგმანის გარეშე\n\n{text}\n\n📡 გადათარგმნილია ავტომატურად"
 
-    await context.bot.send_message(chat_id=message.chat_id, text=final_text)
+    daily_posts.append(final_text)
 
-async def post_init(app):
-    # სტარტზევე გააგზავნის სატესტო პოსტს
-    asyncio.create_task(send_test_message(app))
+    # Media handling (>50MB check)
+    media = event.message.media
+    file_to_send = None
+    if media:
+        if isinstance(media, MessageMediaDocument) and media.document.size > 50 * 1024 * 1024:
+            final_text += f"\n\n🔗 [დიდი ფაილის ორიგინალი ბმული]({event.message.message_link})"
+        else:
+            file_to_send = await event.message.download_media()
+
+    try:
+        await bot_client.send_message(TARGET_CHAT, final_text, file=file_to_send)
+    except Exception as e:
+        logging.error(f"[Crypto Post Error] Failed to send message: {e}")
+    finally:
+        if file_to_send and os.path.exists(file_to_send):
+            os.remove(file_to_send)
+
+# ---- 4. DAILY/WEEKLY DIGEST SCHEDULER ----
+async def digest_scheduler():
+    global last_digest_date, daily_posts
+    tz = zoneinfo.ZoneInfo(TZ_NAME)
+
+    while True:
+        now = datetime.now(tz)
+        current_date = now.date()
+
+        if now.time() >= time(9, 0) and now.time() < time(14, 0) and last_digest_date != current_date:
+            if daily_posts:
+                logging.info("[Crypto Digest] Generating daily digest...")
+                digest_res = await generate_digest(daily_posts, is_weekly=False)
+                if digest_res:
+                    await bot_client.send_message(TARGET_CHAT, f"📊 **კრიპტო დღის მიმოხილვა**\n\n{digest_res}")
+                    
+                    # Friday weekly digest
+                    if now.weekday() == 4:
+                        logging.info("[Crypto Digest] Generating weekly digest...")
+                        weekly_res = await generate_digest(daily_posts, is_weekly=True)
+                        if weekly_res:
+                            await bot_client.send_message(TARGET_CHAT, f"🗓️ **კრიპტო კვირის მიმოხილვა**\n\n{weekly_res}")
+                    
+                    last_digest_date = current_date
+                    daily_posts.clear()
+                else:
+                    if ADMIN_CHAT:
+                        await bot_client.send_message(ADMIN_CHAT, "⚠️ Crypto Bot: დღის დაჯამება ვერ შეიქმნა 5 მცდელობის შემდეგ.")
+            else:
+                last_digest_date = current_date
+
+        await asyncio.sleep(60)
+
+# ---- 5. MAIN EXECUTION ----
+async def main():
+    await user_client.start()
+    await bot_client.start(bot_token=BOT_TOKEN)
+    logging.info("Crypto News Bot Started...")
+    asyncio.create_task(digest_scheduler())
+    await asyncio.gather(
+        user_client.run_until_disconnected(),
+        bot_client.run_until_disconnected()
+    )
 
 if __name__ == "__main__":
-    Thread(target=run_flask).start()
-
-    TOKEN = os.getenv("BOT_TOKEN", "8959231295:AAEEs-A6bD2txWI2i_7EfcKJ_peGHlIriho")
-    
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
-    
-    app.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.TEXT | filters.CAPTION), handle_channel_post))
-    
-    logging.info("ბოტი წარმატებით გაეშვა...")
-    app.run_polling()
+    asyncio.run(main())
