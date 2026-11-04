@@ -1,3 +1,2 @@
-telethon
+python-telegram-bot
 httpx
-aiohttp
