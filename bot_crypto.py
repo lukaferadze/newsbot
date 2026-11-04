@@ -168,7 +168,12 @@ async def main():
             if file_to_send and os.path.exists(file_to_send):
                 os.remove(file_to_send)
 
-    await user_client.start()
+    # ავტორიზაცია Render-ისთვის: connect() start()-ის ნაცვლად
+    await user_client.connect()
+    if not await user_client.is_user_authorized():
+        logging.error("User session is not authorized! Please run locally first.")
+        return
+
     await bot_client.start(bot_token=BOT_TOKEN)
     logging.info("Crypto News Bot Started...")
     asyncio.create_task(digest_scheduler())
